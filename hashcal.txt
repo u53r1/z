@@ -1,0 +1,20 @@
+#include<stdio.h>
+#include<Windows.h>
+
+DWORD getHashFromString(char* string)
+{
+	size_t stringLength = strnlen_s(string, 50);
+	DWORD hash = 0x35;
+
+	for (size_t i = 0; i < stringLength; i++)
+	{
+		hash += (hash * 0xab10f29f + string[i]) & 0xffffff;
+	}
+
+	return hash;
+}
+int main() {
+	char* name = (char*)"CreateRemoteThread";
+	DWORD hash = getHashFromString(name);
+	printf("HASH is %d",hash);
+}
